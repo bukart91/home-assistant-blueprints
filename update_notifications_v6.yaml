@@ -107,7 +107,6 @@ max: 100
 # —————————————————————————————————————————
 variables:
   _update_entities: !input update_entities
-  _notify_devices: !input notify_devices
   _send_to_ha: !input send_to_ha
   _only_after: !input only_after
   _only_before: !input only_before
@@ -134,13 +133,11 @@ variables:
 # Triggers
 # —————————————————————————————————————————
 trigger:
-  # Ny opdatering
   - id: new
     platform: state
     entity_id: !input update_entities
     to: "on"
 
-  # Installeringsstart (in_progress true)
   - id: started
     platform: state
     entity_id: !input update_entities
@@ -148,52 +145,45 @@ trigger:
     from: false
     to: true
 
-  # Opdatering færdig
   - id: done
     platform: state
     entity_id: !input update_entities
     from: "on"
     to: "off"
 
-  # Android action (Install)
   - id: install
     platform: event
     event_type: mobile_app_notification_action
     event_data:
       action: install-update
 
-  # iOS action (Install)
   - id: install_ios
     platform: event
     event_type: mobile_app_notification_action
     event_data:
       actionName: install-update
 
-  # Android action (Skip)
   - id: skip
     platform: event
     event_type: mobile_app_notification_action
     event_data:
       action: skip-update
 
-  # iOS action (Skip)
   - id: skip_ios
     platform: event
     event_type: mobile_app_notification_action
     event_data:
       actionName: skip-update
 
-  # iOS "sticky" (tryk -> genskab notifikation)
   - id: sticky_ios
     platform: event
     event_type: mobile_app_notification_action
     event_data:
       action: URI
 
-  # Timebaseret opsummering
   - id: hourly
     platform: time_pattern
-    minutes: "/5"  # kør hvert 5. min.
+    minutes: "/5"
     enabled: "{{ (_reminder_hours | int(0)) > 0 }}"
 
 condition: []
@@ -204,8 +194,8 @@ condition: []
 action:
   - choose:
 
-      # — 0) Diagnose helper (kaldes via "parallel" i sekvenser) —
-      - conditions: "{{ false }}"  # dummy (ikke kørbar gren)
+      # — 0) Diagnose helper —
+      - conditions: "{{ false }}"
         sequence: &DIAG_HELPER
           - if: "{{ _diag_enable }}"
             then:
@@ -230,286 +220,4 @@ action:
                         time: "{{ now() }}"
                         updates_on: "{{ updates_on }}"
 
-      # — 1) iOS sticky rekreation (tryk på notifikation -> opfrisk) —
-      - conditions:
-          - condition: template
-            value_template: >-
-              {{ trigger.id == 'sticky_ios'
-                 and trigger.event.data.action_data is mapping
-                 and trigger.event.data.action_data.tag is string
-                 and is_state('update.' ~ trigger.event.data.action_data.tag, 'on') }}
-        sequence:
-          - variables:
-              entity_id: >-
-                {{ 'update.' ~ trigger.event.data.action_data.tag }}
-              diag_message: >-
-                [sticky_ios] recreate notification for {{ entity_id }}
-          - parallel:
-              - sequence: *DIAG_HELPER
-              - sequence:
-                  - condition: time
-                    after: !input only_after
-                    before: !input only_before
-                  - parallel:
-                      - sequence: &SEND_TO_DEVICES
-                          - repeat:
-                              for_each: "{{ _notify_devices }}"
-                              sequence:
-                                - device_id: "{{ repeat.item }}"
-                                  domain: mobile_app
-                                  type: notify
-                                  title: >-
-                                    {{ state_attr(entity_id, 'friendly_name') }}
-                                  message: >-
-                                    {% set summary = state_attr(entity_id, 'release_summary') %}
-                                    Nyeste: {{ state_attr(entity_id, 'latest_version') }}<br>
-                                    Installeret: {{ state_attr(entity_id, 'installed_version') }}
-                                    {{ '<br>' ~ summary if summary is string }}
-                                  data:
-                                    tag: "{{ entity_id | replace('update.','') }}"
-                                    channel: Updates
-                                    group: Updates
-                                    actions:
-                                      - action: install-update
-                                        title: Installer
-                                        authenticationRequired: true
-                                      - action: skip-update
-                                        title: Skip
-                                        destructive: true
-                                    url: "{{ state_attr(entity_id,'release_url') if _include_changelog_link and state_attr(entity_id,'release_url') else '' }}"
-                      - sequence:
-                          - if: "{{ _send_to_ha }}"
-                            then:
-                              - service: persistent_notification.create
-                                data:
-                                  notification_id: "{{ entity_id | replace('update.','') }}"
-                                  title: "{{ state_attr(entity_id, 'friendly_name') }}"
-                                  message: >-
-                                    {% set summary = state_attr(entity_id, 'release_summary') %}
-                                    Nyeste: {{ state_attr(entity_id, 'latest_version') }}
-                                    \nInstalleret: {{ state_attr(entity_id, 'installed_version') }}
-                                    {{ '\n' ~ summary if summary is string }}
-
-      # — 2) Skip action —
-      - conditions:
-          - condition: template
-            value_template: "{{ trigger.id in ['skip','skip_ios'] }}"
-        sequence:
-          - variables:
-              entity_id: >-
-                {{ 'update.' ~ (trigger.event.data.action_data.tag
-                   if trigger.event.data.action_data is mapping and trigger.event.data.action_data.tag is string
-                   else '') }}
-              diag_message: "[skip] {{ entity_id }}"
-          - parallel:
-              - sequence: *DIAG_HELPER
-              - sequence:
-                  - choose:
-                      - conditions: "{{ entity_id | regex_match('^update[.]') }}"
-                        sequence:
-                          - service: update.skip
-                            data:
-                              entity_id: "{{ entity_id }}"
-
-      # — 3) Install action —
-      - conditions:
-          - condition: template
-            value_template: "{{ trigger.id in ['install','install_ios'] }}"
-        sequence:
-          - variables:
-              entity_id: >-
-                {{ 'update.' ~ (trigger.event.data.action_data.tag
-                   if trigger.event.data.action_data is mapping and trigger.event.data.action_data.tag is string
-                   else '') }}
-              diag_message: "[install] {{ entity_id }} (backup={{ _backup_before_install }})"
-          - parallel:
-              - sequence: *DIAG_HELPER
-              - sequence:
-                  - choose:
-                      - conditions: "{{ entity_id | regex_match('^update[.]') }}"
-                        sequence:
-                          - if: "{{ _backup_before_install }}"
-                            then:
-                              - service: backup.create
-                                data:
-                                  name: "Pre-update backup for {{ entity_id }}"
-                              - variables:
-                                  diag_message: "[backup.create] done for {{ entity_id }}"
-                              - sequence: *DIAG_HELPER
-                          - service: update.install
-                            data:
-                              entity_id: "{{ entity_id }}"
-                              backup: "{{ _backup_before_install }}"
-                          - if: "{{ _core_check_config }}"
-                            then:
-                              - service: homeassistant.check_config
-                              - variables:
-                                  diag_message: "[core.check_config] called after install for {{ entity_id }}"
-                              - sequence: *DIAG_HELPER
-
-      # — 4) Opdatering færdig -> dismiss —
-      - conditions:
-          - condition: template
-            value_template: "{{ trigger.id == 'done' }}"
-        sequence:
-          - variables:
-              tag_id: "{{ trigger.entity_id | replace('update.','') }}"
-              diag_message: "[done] {{ trigger.entity_id }} (dismiss tag={{ tag_id }})"
-          - parallel:
-              - sequence: *DIAG_HELPER
-              - sequence:
-                  - repeat:
-                      for_each: "{{ _notify_devices }}"
-                      sequence:
-                        - device_id: "{{ repeat.item }}"
-                          domain: mobile_app
-                          type: dismiss_notification
-                          message: "{{ tag_id }}"
-              - sequence:
-                  - if: "{{ _send_to_ha }}"
-                    then:
-                      - service: persistent_notification.dismiss
-                        data:
-                          notification_id: "{{ tag_id }}"
-
-      # — 5) Ny opdatering -> send straks —
-      - conditions:
-          - condition: template
-            value_template: "{{ trigger.id == 'new' }}"
-        sequence:
-          - variables:
-              entity_id: "{{ trigger.entity_id }}"
-              diag_message: "[new] {{ entity_id }}"
-          - parallel:
-              - sequence: *DIAG_HELPER
-              - sequence:
-                  - condition: time
-                    after: !input only_after
-                    before: !input only_before
-                  - parallel:
-                      - sequence: *SEND_TO_DEVICES
-                      - sequence:
-                          - if: "{{ _send_to_ha }}"
-                            then:
-                              - service: persistent_notification.create
-                                data:
-                                  notification_id: "{{ entity_id | replace('update.','') }}"
-                                  title: "{{ state_attr(entity_id, 'friendly_name') }}"
-                                  message: >-
-                                    {% set summary = state_attr(entity_id, 'release_summary') %}
-                                    Nyeste: {{ state_attr(entity_id, 'latest_version') }}
-                                    \nInstalleret: {{ state_attr(entity_id, 'installed_version') }}
-                                    {{ '\n' ~ summary if summary is string }}
-
-      # — 6) Installeringsstart (in_progress true) -> log + evt. core check —
-      - conditions:
-          - condition: template
-            value_template: "{{ trigger.id == 'started' }}"
-        sequence:
-          - variables:
-              entity_id: "{{ trigger.entity_id }}"
-              diag_message: "[started] {{ entity_id }} in_progress=true"
-          - parallel:
-              - sequence: *DIAG_HELPER
-              - sequence:
-                  - if: "{{ _core_check_config }}"
-                    then:
-                      - service: homeassistant.check_config
-                      - variables:
-                          diag_message: "[core.check_config] called on started for {{ entity_id }}"
-                      - sequence: *DIAG_HELPER
-
-      # — 7) Reminder hver N. time —
-      - conditions:
-          - condition: template
-            value_template: >-
-              {{ trigger.id == 'hourly' and (_reminder_hours | int(0)) > 0
-                 and now().hour % (_reminder_hours | int(0)) == 0
-                 and now().minute == 0 }}
-        sequence:
-          - variables:
-              diag_message: "[reminder] updates_on={{ updates_on | count }}"
-          - parallel:
-              - sequence: *DIAG_HELPER
-              - sequence:
-                  - if: "{{ updates_on | count > 0 }}"
-                    then:
-                      - condition: time
-                        after: !input only_after
-                        before: !input only_before
-                      - parallel:
-                          - sequence:
-                              - repeat:
-                                  for_each: "{{ _notify_devices }}"
-                                  sequence:
-                                    - device_id: "{{ repeat.item }}"
-                                      domain: mobile_app
-                                      type: notify
-                                      title: "Opdateringer tilgængelige ({{ updates_on | count }})"
-                                      message: >-
-                                        {{ updates_on
-                                            | map('replace','update.','')
-                                            | map('regex_replace','^','- ')
-                                            | join('<br>') }}
-                                      data:
-                                        tag: update_reminder
-                                        channel: Updates
-                                        group: Updates
-                          - sequence:
-                              - if: "{{ _send_to_ha }}"
-                                then:
-                                  - service: persistent_notification.create
-                                    data:
-                                      notification_id: update_reminder
-                                      title: "Opdateringer tilgængelige ({{ updates_on | count }})"
-                                      message: >-
-                                        {{ updates_on
-                                            | map('replace','update.','')
-                                            | map('regex_replace','^','- ')
-                                            | join('\n') }}
-
-      # — 8) MANUEL RUN (opsummer nu) —
-      - conditions:
-          - condition: template
-            value_template: "{{ trigger is not defined or trigger == none }}"
-        sequence:
-          - variables:
-              diag_message: "[manual] opsummer nu; updates_on={{ updates_on | count }}"
-          - parallel:
-              - sequence: *DIAG_HELPER
-              - sequence:
-                  - if: "{{ updates_on | count > 0 }}"
-                    then:
-                      - condition: time
-                        after: !input only_after
-                        before: !input only_before
-                      - parallel:
-                          - sequence:
-                              - repeat:
-                                  for_each: "{{ _notify_devices }}"
-                                  sequence:
-                                    - device_id: "{{ repeat.item }}"
-                                      domain: mobile_app
-                                      type: notify
-                                      title: "Opdateringer tilgængelige ({{ updates_on | count }})"
-                                      message: >-
-                                        {{ updates_on
-                                            | map('replace','update.','')
-                                            | map('regex_replace','^','- ')
-                                            | join('<br>') }}
-                                      data:
-                                        tag: update_manual
-                                        channel: Updates
-                                        group: Updates
-                          - sequence:
-                              - if: "{{ _send_to_ha }}"
-                                then:
-                                  - service: persistent_notification.create
-                                    data:
-                                      notification_id: update_manual
-                                      title: "Opdateringer tilgængelige ({{ updates_on | count }})"
-                                      message: >-
-                                        {{ updates_on
-                                            | map('replace','update.','')
-                                            | map('regex_replace','^','- ')
-                                            | join('\n') }}
+      # — 1)
