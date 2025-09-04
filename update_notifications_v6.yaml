@@ -77,6 +77,7 @@ blueprint:
       selector:
         boolean: {}
 
+    # — Diagnose-logging —
     diag_enable:
       name: Diagnose-log (aktivér)
       description: Skriv detaljer til systemlog/logbook og (valgfrit) fire et custom event
@@ -101,6 +102,9 @@ blueprint:
 mode: parallel
 max: 100
 
+# —————————————————————————————————————————
+# Variables
+# —————————————————————————————————————————
 variables:
   _update_entities: !input update_entities
   _notify_devices: !input notify_devices
@@ -115,6 +119,7 @@ variables:
   _diag_level: !input diag_level
   _diag_fire_event: !input diag_fire_event
 
+  # Alle updates der pt. er 'on' og ikke kører (in_progress != true)
   updates_on: >-
     {{
       (_update_entities
@@ -125,12 +130,17 @@ variables:
         | list)
     }}
 
+# —————————————————————————————————————————
+# Triggers
+# —————————————————————————————————————————
 trigger:
+  # Ny opdatering
   - id: new
     platform: state
     entity_id: !input update_entities
     to: "on"
 
+  # Installeringsstart (in_progress true)
   - id: started
     platform: state
     entity_id: !input update_entities
@@ -138,53 +148,64 @@ trigger:
     from: false
     to: true
 
+  # Opdatering færdig
   - id: done
     platform: state
     entity_id: !input update_entities
     from: "on"
     to: "off"
 
+  # Android action (Install)
   - id: install
     platform: event
     event_type: mobile_app_notification_action
     event_data:
       action: install-update
 
+  # iOS action (Install)
   - id: install_ios
     platform: event
     event_type: mobile_app_notification_action
     event_data:
       actionName: install-update
 
+  # Android action (Skip)
   - id: skip
     platform: event
     event_type: mobile_app_notification_action
     event_data:
       action: skip-update
 
+  # iOS action (Skip)
   - id: skip_ios
     platform: event
     event_type: mobile_app_notification_action
     event_data:
       actionName: skip-update
 
+  # iOS "sticky" (tryk -> genskab notifikation)
   - id: sticky_ios
     platform: event
     event_type: mobile_app_notification_action
     event_data:
       action: URI
 
+  # Timebaseret opsummering
   - id: hourly
     platform: time_pattern
-    minutes: "/5"
+    minutes: "/5"  # kør hvert 5. min.
     enabled: "{{ (_reminder_hours | int(0)) > 0 }}"
 
 condition: []
 
+# —————————————————————————————————————————
+# Actions
+# —————————————————————————————————————————
 action:
   - choose:
 
-      - conditions: "{{ false }}"
+      # — 0) Diagnose helper (kaldes via "parallel" i sekvenser) —
+      - conditions: "{{ false }}"  # dummy (ikke kørbar gren)
         sequence: &DIAG_HELPER
           - if: "{{ _diag_enable }}"
             then:
@@ -209,6 +230,7 @@ action:
                         time: "{{ now() }}"
                         updates_on: "{{ updates_on }}"
 
+      # — 1) iOS sticky rekreation (tryk på notifikation -> opfrisk) —
       - conditions:
           - condition: template
             value_template: >-
@@ -244,8 +266,7 @@ action:
                                     Installeret: {{ state_attr(entity_id, 'installed_version') }}
                                     {{ '<br>' ~ summary if summary is string }}
                                   data:
-                                    tag: >-
-                                      {{ entity_id | replace('update.','') }}
+                                    tag: "{{ entity_id | replace('update.','') }}"
                                     channel: Updates
                                     group: Updates
                                     actions:
@@ -255,24 +276,21 @@ action:
                                       - action: skip-update
                                         title: Skip
                                         destructive: true
-                                    {% if _include_changelog_link and state_attr(entity_id,'release_url') %}
-                                    url: "{{ state_attr(entity_id,'release_url') }}"
-                                    {% endif %}
+                                    url: "{{ state_attr(entity_id,'release_url') if _include_changelog_link and state_attr(entity_id,'release_url') else '' }}"
                       - sequence:
                           - if: "{{ _send_to_ha }}"
                             then:
                               - service: persistent_notification.create
                                 data:
-                                  notification_id: >-
-                                    {{ entity_id | replace('update.','') }}
-                                  title: >-
-                                    {{ state_attr(entity_id, 'friendly_name') }}
+                                  notification_id: "{{ entity_id | replace('update.','') }}"
+                                  title: "{{ state_attr(entity_id, 'friendly_name') }}"
                                   message: >-
                                     {% set summary = state_attr(entity_id, 'release_summary') %}
                                     Nyeste: {{ state_attr(entity_id, 'latest_version') }}
                                     \nInstalleret: {{ state_attr(entity_id, 'installed_version') }}
                                     {{ '\n' ~ summary if summary is string }}
 
+      # — 2) Skip action —
       - conditions:
           - condition: template
             value_template: "{{ trigger.id in ['skip','skip_ios'] }}"
@@ -293,6 +311,7 @@ action:
                             data:
                               entity_id: "{{ entity_id }}"
 
+      # — 3) Install action —
       - conditions:
           - condition: template
             value_template: "{{ trigger.id in ['install','install_ios'] }}"
@@ -328,6 +347,7 @@ action:
                                   diag_message: "[core.check_config] called after install for {{ entity_id }}"
                               - sequence: *DIAG_HELPER
 
+      # — 4) Opdatering færdig -> dismiss —
       - conditions:
           - condition: template
             value_template: "{{ trigger.id == 'done' }}"
@@ -352,6 +372,7 @@ action:
                         data:
                           notification_id: "{{ tag_id }}"
 
+      # — 5) Ny opdatering -> send straks —
       - conditions:
           - condition: template
             value_template: "{{ trigger.id == 'new' }}"
@@ -372,16 +393,15 @@ action:
                             then:
                               - service: persistent_notification.create
                                 data:
-                                  notification_id: >-
-                                    {{ entity_id | replace('update.','') }}
-                                  title: >-
-                                    {{ state_attr(entity_id, 'friendly_name') }}
+                                  notification_id: "{{ entity_id | replace('update.','') }}"
+                                  title: "{{ state_attr(entity_id, 'friendly_name') }}"
                                   message: >-
                                     {% set summary = state_attr(entity_id, 'release_summary') %}
                                     Nyeste: {{ state_attr(entity_id, 'latest_version') }}
                                     \nInstalleret: {{ state_attr(entity_id, 'installed_version') }}
                                     {{ '\n' ~ summary if summary is string }}
 
+      # — 6) Installeringsstart (in_progress true) -> log + evt. core check —
       - conditions:
           - condition: template
             value_template: "{{ trigger.id == 'started' }}"
@@ -399,6 +419,7 @@ action:
                           diag_message: "[core.check_config] called on started for {{ entity_id }}"
                       - sequence: *DIAG_HELPER
 
+      # — 7) Reminder hver N. time —
       - conditions:
           - condition: template
             value_template: >-
@@ -447,6 +468,7 @@ action:
                                             | map('regex_replace','^','- ')
                                             | join('\n') }}
 
+      # — 8) MANUEL RUN (opsummer nu) —
       - conditions:
           - condition: template
             value_template: "{{ trigger is not defined or trigger == none }}"
