@@ -155,18 +155,6 @@ trigger:
     event_data:
       actionName: skip-update
 
-  - id: snooze_1m
-    platform: event
-    event_type: mobile_app_notification_action
-    event_data:
-      action: snooze_1m
-
-  - id: snooze_1m_ios
-    platform: event
-    event_type: mobile_app_notification_action
-    event_data:
-      actionName: snooze_1m
-
   - id: snooze_1h
     platform: event
     event_type: mobile_app_notification_action
@@ -285,55 +273,7 @@ action:
 - conditions:
           - condition: template
             value_template: >-
-              {{ 
-      # — Snooze (1 minut test) —
-      - conditions:
-          - condition: template
-            value_template: >-
-              {{ trigger.id in ['snooze_1m','snooze_1m_ios'] }}
-        sequence:
-          - variables:
-              entity_id: >-
-                {{ 'update.' ~
-                   (trigger.event.data.action_data.tag
-                     if trigger.event.data is mapping
-                        and trigger.event.data.action_data is mapping
-                        and trigger.event.data.action_data.tag is string
-                     else '') }}
-              delay_seconds: 60
-              diag_message: "[snooze-1m] {{ entity_id }} for 60s"
-          - parallel:
-              - sequence: *DIAG_HELPER
-              - sequence:
-                  - delay:
-                      seconds: "{{ delay_seconds }}"
-                  - condition: template
-                    value_template: "{{ entity_id | regex_match('^update[.]') and is_state(entity_id, 'on') }}"
-                  - condition: time
-                    after: !input only_after
-                    before: !input only_before
-                  - repeat:
-                      for_each: !input notify_devices
-                      sequence:
-                        - variables:
-                            notify_service: "{{ 'notify.mobile_app_' ~ (device_attr(repeat.item,'name') | slugify) }}"
-                            dm2: "[notify] {{ notify_service }} (snooze 1m reminder)"
-                        - service: "{{ notify_service }}"
-                          data:
-                            title: "{{ state_attr(entity_id, 'friendly_name') }}"
-                            message: >-
-                              {% set summary = state_attr(entity_id, 'release_summary') %}
-                              (Påmindelse — 1 min) Nyeste: {{ state_attr(entity_id, 'latest_version') }}
-                              \nInstalleret: {{ state_attr(entity_id, 'installed_version') }}
-                              {{ '\n' ~ summary if summary is string }}
-                            data:
-                              tag: "{{ entity_id | replace('update.','') }}"
-                              channel: Updates
-                              group: Updates
-                        - variables:
-                            diag_message: "{{ dm2 }}"
-                        - sequence: *DIAG_HELPER
-trigger.id == 'sticky_ios'
+              {{ trigger.id == 'sticky_ios'
                  and trigger.event.data.action_data is mapping
                  and trigger.event.data.action_data.tag is string
                  and is_state('update.' ~ trigger.event.data.action_data.tag, 'on') }}
@@ -370,8 +310,6 @@ trigger.id == 'sticky_ios'
                                 - action: skip-update
                                   title: Skip
                                   destructive: true
-                                - action: snooze_1m
-                                  title: "Påmind om 1 minut"
                                 - action: snooze_1h
                                   title: "Påmind om 1 time"
                                 - action: snooze_4h
@@ -479,8 +417,6 @@ trigger.id == 'sticky_ios'
                                 - action: skip-update
                                   title: Skip
                                   destructive: true
-                                - action: snooze_1m
-                                  title: "Påmind om 1 minut"
                                 - action: snooze_1h
                                   title: "Påmind om 1 time"
                                 - action: snooze_4h
