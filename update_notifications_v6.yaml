@@ -1,7 +1,7 @@
 blueprint:
-  name: "Update Notifications (V6-Plus — multi-device, manual run, backup, core check, diagnostics)"
+  name: "Update Notifications (V6.3-Plus — multi-device, manual run, backup, core check, diagnostics)"
   description: >
-    Notifikationer for update.*-enheder med Install/Skip actions (Android/iOS).
+    Notifikationer for update.*-enheder med Skip action (Android/iOS).
     Virker ved manuel kørsel (opsummer nu), understøtter flere mobile_app-enheder,
     valgfri backup før install, Core config-check, og diagnose-log til fejlfinding.
   domain: automation
@@ -143,18 +143,6 @@ trigger:
     from: "on"
     to: "off"
 
-  - id: install
-    platform: event
-    event_type: mobile_app_notification_action
-    event_data:
-      action: install-update
-
-  - id: install_ios
-    platform: event
-    event_type: mobile_app_notification_action
-    event_data:
-      actionName: install-update
-
   - id: skip
     platform: event
     event_type: mobile_app_notification_action
@@ -195,7 +183,7 @@ action:
                   message: "{{ diag_message | default('') }}"
               - service: logbook.log
                 data:
-                  name: "Update V6-Plus"
+                  name: "Update V6.3-Plus"
                   message: "{{ diag_message | default('') }}"
                   domain: automation
               - if: "{{ _diag_fire_event }}"
@@ -247,9 +235,6 @@ action:
                               channel: Updates
                               group: Updates
                               actions:
-                                - action: install-update
-                                  title: Installer
-                                  authenticationRequired: true
                                 - action: skip-update
                                   title: Skip
                                   destructive: true
@@ -287,39 +272,6 @@ action:
                           - service: update.skip
                             data:
                               entity_id: "{{ entity_id }}"
-
-      # — Install action —
-      - conditions:
-          - condition: template
-            value_template: "{{ trigger.id in ['install','install_ios'] }}"
-        sequence:
-          - variables:
-              entity_id: "{{ 'update.' ~ (trigger.event.data.action_data.tag if trigger.event.data.action_data is mapping and trigger.event.data.action_data.tag is string else '') }}"
-              diag_message: "[install] {{ entity_id }} (backup={{ _backup_before_install }})"
-          - parallel:
-              - sequence: *DIAG_HELPER
-              - sequence:
-                  - choose:
-                      - conditions: "{{ entity_id | regex_match('^update[.]') }}"
-                        sequence:
-                          - if: "{{ _backup_before_install }}"
-                            then:
-                              - service: backup.create
-                                data:
-                                  name: "Pre-update backup for {{ entity_id }}"
-                              - variables:
-                                  diag_message: "[backup.create] done for {{ entity_id }}"
-                              - sequence: *DIAG_HELPER
-                          - service: update.install
-                            data:
-                              entity_id: "{{ entity_id }}"
-                              backup: "{{ _backup_before_install }}"
-                          - if: "{{ _core_check_config }}"
-                            then:
-                              - service: homeassistant.check_config
-                              - variables:
-                                  diag_message: "[core.check_config] called after install for {{ entity_id }}"
-                              - sequence: *DIAG_HELPER
 
       # — Done -> dismiss —
       - conditions:
@@ -386,9 +338,6 @@ action:
                               channel: Updates
                               group: Updates
                               actions:
-                                - action: install-update
-                                  title: Installer
-                                  authenticationRequired: true
                                 - action: skip-update
                                   title: Skip
                                   destructive: true
