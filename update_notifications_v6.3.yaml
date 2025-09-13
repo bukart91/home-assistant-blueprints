@@ -1,188 +1,130 @@
 blueprint:
-  name: "Update Notifications — Test 1m (minimal)"
+  name: Update Notifications v6.3 — relative reminders (minutes)
   description: >
-    Minimal blueprint til at teste snooze 1 minut for update.* enheder.
-    Indeholder: new/done triggers, skip, snooze_1m (Android/iOS), og enkel notifikation.
+    Sender påmindelser om Home Assistant updates (entities i domain 'update'),
+    relativt til hvornår de blev "on". Første påmindelse kommer efter det
+    valgte antal MINUTTER, og du kan valgfrit gentage med et minut-interval.
+    Ignorerer updates med attributes.in_progress = true.
   domain: automation
-  source_url: https://raw.githubusercontent.com/bukart91/home-assistant-blueprints/main/update_notifications_test1m_minimal.yaml
-
   input:
-    update_entities:
-      name: Update entities
+    reminder_after_minutes:
+      name: Første påmindelse efter (minutter)
+      description: "Antal minutter fra update blev 'on' til første påmindelse (0 = straks)."
+      default: 60
       selector:
-        entity:
-          domain: update
-          multiple: true
+        number:
+          min: 0
+          max: 1440
+          unit_of_measurement: minutes
+          mode: box
+
+    repeat_every_minutes:
+      name: Gentag hver (minutter, 0 = ingen gentagelse)
+      description: "Sæt til 0 for kun én påmindelse. Brug små værdier (fx 1-5) til hurtig test."
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 1440
+          unit_of_measurement: minutes
+          mode: box
 
     notify_devices:
-      name: Devices Notified (1+)
-      default: []
+      name: Enheder at notificere (mobile_app)
+      description: "Vælg én eller flere telefoner/tablets (mobile_app)."
       selector:
         device:
-          filter:
-            - integration: mobile_app
+          integration: mobile_app
           multiple: true
 
-    only_after:
-      name: Kun efter
-      default: "00:00:00"
-      selector: { time: {} }
-
-    only_before:
-      name: Kun før
-      default: "23:59:59"
-      selector: { time: {} }
-
-mode: parallel
-max: 50
+mode: restart
+max_exceeded: silent
 
 variables:
-  _only_after: !input only_after
-  _only_before: !input only_before
+  _after_mins: !input reminder_after_minutes
+  _repeat_mins: !input repeat_every_minutes
+  _notify_devices: !input notify_devices
+
+  # Liste over update-entities der er "due" lige nu ift. minutes-logikken
+  due_updates: >-
+    {% set updates = states.update
+         | selectattr('state','eq','on')
+         | rejectattr('attributes.in_progress','eq',true)
+         | list %}
+    {% set now_ts = as_timestamp(now()) %}
+    {% set due = [] %}
+    {% for s in updates %}
+      {% set age_m = ((now_ts - as_timestamp(s.last_changed)) / 60) | int(0) %}
+      {% if _after_mins <= 0 %}
+        {# Første påmindelse straks når den er 'on' #}
+        {% set first_due = (age_m >= 0) %}
+      {% else %}
+        {# Første påmindelse når alder >= _after_mins #}
+        {% set first_due = (age_m >= _after_mins) %}
+      {% endif %}
+
+      {% if _repeat_mins | int(0) > 0 %}
+        {# Gentagelse: efter første påmindelse, hver _repeat_mins #}
+        {% set repeat_due = (age_m >= _after_mins) and ((age_m - _after_mins) % _repeat_mins == 0) %}
+        {% set is_due = repeat_due %}
+      {% else %}
+        {# Kun én påmindelse: ram kun det MINUT hvor age_m == _after_mins #}
+        {% set is_due = first_due and (age_m == _after_mins) %}
+      {% endif %}
+
+      {% if is_due %}
+        {% set _ = due.append(s) %}
+      {% endif %}
+    {% endfor %}
+    {{ due }}
+
+  due_names: >-
+    {% if due_updates | count == 0 %}
+      Ingen
+    {% else %}
+      {{ due_updates | map(attribute='name') | list | join(', ') }}
+    {% endif %}
 
 trigger:
-  - id: new
-    platform: state
-    entity_id: !input update_entities
-    to: "on"
+  # Kør hvert minut så vi kan fange præcise minut-grænser
+  - id: tick
+    platform: time_pattern
+    minutes: "/1"
 
-  - id: done
-    platform: state
-    entity_id: !input update_entities
-    from: "on"
-    to: "off"
-
-  # Mobile actions (Android/iOS)
-  - id: skip
-    platform: event
-    event_type: mobile_app_notification_action
-    event_data:
-      action: skip-update
-
-  - id: skip_ios
-    platform: event
-    event_type: mobile_app_notification_action
-    event_data:
-      actionName: skip-update
-
-  - id: snooze_1m
-    platform: event
-    event_type: mobile_app_notification_action
-    event_data:
-      action: snooze_1m
-
-  - id: snooze_1m_ios
-    platform: event
-    event_type: mobile_app_notification_action
-    event_data:
-      actionName: snooze_1m
-
-condition: []
+condition:
+  # Kun hvis der faktisk er noget "due" netop dette minut
+  - condition: template
+    value_template: "{{ (due_updates | count) > 0 }}"
 
 action:
+  - variables:
+      msg_title: >-
+        🔔 Opdateringspåmindelse ({{ due_updates | count }})
+      msg_body: >-
+        Følgende opdateringer er due: {{ due_names }}.
+        {% if _repeat_mins | int(0) > 0 %}
+        (Første efter {{ _after_mins }} min, gentages hver {{ _repeat_mins }} min.)
+        {% else %}
+        (Første og eneste påmindelse {{ _after_mins }} min efter status blev 'on'.)
+        {% endif %}
+
+  # Send til valgte mobile_app-enheder
   - choose:
-
-      # === New -> send notification ===
-      - conditions:
-          - condition: template
-            value_template: "{{ trigger.id == 'new' }}"
+      - conditions: "{{ _notify_devices is defined and (_notify_devices | length) > 0 }}"
         sequence:
-          - variables:
-              entity_id: "{{ trigger.entity_id }}"
-          - condition: time
-            after: !input only_after
-            before: !input only_before
           - repeat:
-              for_each: !input notify_devices
+              for_each: "{{ _notify_devices }}"
               sequence:
-                - variables:
-                    notify_service: "{{ 'notify.mobile_app_' ~ (device_attr(repeat.item,'name') | slugify) }}"
-                - service: "{{ notify_service }}"
+                - device_id: "{{ repeat.item }}"
+                  domain: mobile_app
+                  type: notify
+                  title: "{{ msg_title }}"
+                  message: "{{ msg_body }}"
                   data:
-                    title: "{{ state_attr(entity_id, 'friendly_name') }}"
-                    message: |
-                      Nyeste: {{ state_attr(entity_id, 'latest_version') }}
-                      Installeret: {{ state_attr(entity_id, 'installed_version') }}
-                    data:
-                      tag: "{{ entity_id | replace('update.','') }}"
-                      channel: Updates
-                      group: Updates
-                      actions:
-                        - action: skip-update
-                          title: Skip
-                          destructive: true
-                        - action: snooze_1m
-                          title: "Påmind om 1 minut"
+                    notification_icon: "mdi:update"
 
-      # === Done -> dismiss notification ===
-      - conditions:
-          - condition: template
-            value_template: "{{ trigger.id == 'done' }}"
-        sequence:
-          - variables:
-              tag_id: "{{ trigger.entity_id | replace('update.','') }}"
-          - repeat:
-              for_each: !input notify_devices
-              sequence:
-                - variables:
-                    notify_service: "{{ 'notify.mobile_app_' ~ (device_attr(repeat.item,'name') | slugify) }}"
-                - service: "{{ notify_service }}"
-                  data:
-                    message: clear_notification
-                    data:
-                      tag: "{{ tag_id }}"
-
-      # === Skip -> call update.skip ===
-      - conditions:
-          - condition: template
-            value_template: "{{ trigger.id in ['skip','skip_ios'] }}"
-        sequence:
-          - variables:
-              entity_id: >-
-                {{ 'update.' ~ (
-                   trigger.event.data.action_data.tag
-                     if trigger.event.data is mapping
-                     and trigger.event.data.action_data.tag is string
-                     else '') }}
-          - choose:
-              - conditions: "{{ entity_id | regex_match('^update[.]') }}"
-                sequence:
-                  - service: update.skip
-                    data:
-                      entity_id: "{{ entity_id }}"
-
-      # === Snooze 1m -> wait & re-notify ===
-      - conditions:
-          - condition: template
-            value_template: "{{ trigger.id in ['snooze_1m','snooze_1m_ios'] }}"
-        sequence:
-          - variables:
-              entity_id: >-
-                {{ 'update.' ~ (
-                   trigger.event.data.action_data.tag
-                     if trigger.event.data is mapping
-                     and trigger.event.data.action_data is mapping
-                     and trigger.event.data.action_data.tag is string
-                     else '') }}
-          - delay:
-              seconds: 60
-          - condition: template
-            value_template: "{{ entity_id | regex_match('^update[.]') and is_state(entity_id, 'on') }}"
-          - condition: time
-            after: !input only_after
-            before: !input only_before
-          - repeat:
-              for_each: !input notify_devices
-              sequence:
-                - variables:
-                    notify_service: "{{ 'notify.mobile_app_' ~ (device_attr(repeat.item,'name') | slugify) }}"
-                - service: "{{ notify_service }}"
-                  data:
-                    title: "{{ state_attr(entity_id, 'friendly_name') }}"
-                    message: |
-                      (Påmindelse — 1 min) Nyeste: {{ state_attr(entity_id, 'latest_version') }}
-                      Installeret: {{ state_attr(entity_id, 'installed_version') }}
-                    data:
-                      tag: "{{ entity_id | replace('update.','') }}"
-                      channel: Updates
-                      group: Updates
+  # Fallback: persistent notification i HA
+  - service: persistent_notification.create
+    data:
+      title: "{{ msg_title }}"
+      message: "{{ msg_body }}"
