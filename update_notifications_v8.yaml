@@ -1,0 +1,170 @@
+blueprint:
+  name: "Update Notifications (V7 — enkel notifikation, ingen reminders, ingen core-check)"
+  description: >
+    Sender en simpel notifikation når én eller flere update.* enheder går ON.
+    Ingen tidsbaserede påmindelser og ingen 'homeassistant.check_config'.
+  domain: automation
+  source_url: https://example.invalid/bukart/update_notifications_v7_simple.yaml
+
+  input:
+    update_entities:
+      name: Update entities
+      description: Vælg de update.* enheder der skal overvåges
+      selector:
+        entity:
+          domain: update
+          multiple: true
+
+    notify_devices:
+      name: Devices Notified (1+)
+      description: Vælg én eller flere mobile_app-enheder (telefoner) som skal modtage notifikationer
+      default: []
+      selector:
+        device:
+          filter:
+            - integration: mobile_app
+          multiple: true
+
+    send_to_ha:
+      name: Også som HA persistent notification
+      default: false
+      selector:
+        boolean: {}
+
+    only_after:
+      name: Kun efter (valgfrit)
+      selector:
+        time: {}
+      default: "00:00:00"
+
+    only_before:
+      name: Kun før (valgfrit)
+      selector:
+        time: {}
+      default: "23:59:59"
+
+    diag_enable:
+      name: Diagnose-log (aktivér)
+      default: true
+      selector:
+        boolean: {}
+
+    diag_level:
+      name: Diagnose-niveau
+      default: info
+      selector:
+        select:
+          options: [info, warning, error]
+
+    diag_fire_event:
+      name: Fire et custom diag-event
+      default: false
+      selector:
+        boolean: {}
+
+mode: parallel
+max: 100
+
+variables:
+  _update_entities: !input update_entities
+  _send_to_ha: !input send_to_ha
+  _only_after: !input only_after
+  _only_before: !input only_before
+  _diag_enable: !input diag_enable
+  _diag_level: !input diag_level
+  _diag_fire_event: !input diag_fire_event
+
+  updates_on: >-
+    {{
+      expand(_update_entities)
+        | selectattr('state','eq','on')
+        | map(attribute='entity_id')
+        | list
+    }}
+
+trigger:
+  - id: started
+    platform: state
+    entity_id: !input update_entities
+    from: "off"
+    to: "on"
+
+  - id: cleared
+    platform: state
+    entity_id: !input update_entities
+    to: "off"
+
+condition: []
+
+action:
+  - variables:
+      diag_message: ""
+
+  - choose:
+
+      # ----- Diagnose helper (kan kaldes via *DIAG_HELPER) -----
+      - conditions: "{{ false }}"
+        sequence: &DIAG_HELPER
+          - if: "{{ _diag_enable }}"
+            then:
+              - service: system_log.write
+                data:
+                  level: "{{ _diag_level }}"
+                  message: "{{ diag_message }}"
+              - if: "{{ _diag_fire_event }}"
+                then:
+                  - event: update_notifications.diagnostics
+                    event_data:
+                      message: "{{ diag_message }}"
+
+      # ----- STARTED: send notifikation(er) med tydelig liste -----
+      - conditions: "{{ trigger.id == 'started' }}"
+        sequence:
+          - variables:
+              diag_message: "[started] updates_on={{ updates_on | count }}"
+          - sequence: *DIAG_HELPER
+          - if: "{{ updates_on | count > 0 }}"
+            then:
+              - condition: time
+                after: !input only_after
+                before: !input only_before
+              - repeat:
+                  for_each: !input notify_devices
+                  sequence:
+                    - variables:
+                        notify_service: "{{ 'notify.mobile_app_' ~ (device_attr(repeat.item,'name') | slugify) }}"
+                    - service: "{{ notify_service }}"
+                      data:
+                        title: "Opdateringer tilgængelige ({{ updates_on | count }})"
+                        message: >-
+                          {% for e in updates_on -%}
+                          - {{ state_attr(e,'friendly_name') or e | replace('update.','') }}:
+                            {{ state_attr(e,'installed_version') or 'ukendt' }} → {{ state_attr(e,'latest_version') or 'ukendt' }}
+                          {% endfor -%}
+              - if: "{{ _send_to_ha }}"
+                then:
+                  - service: persistent_notification.create
+                    data:
+                      notification_id: "update_started"
+                      title: "Opdateringer tilgængelige ({{ updates_on | count }})"
+                      message: >-
+                        {% for e in updates_on -%}
+                        - {{ state_attr(e,'friendly_name') or e | replace('update.','') }}:
+                          {{ state_attr(e,'installed_version') or 'ukendt' }} → {{ state_attr(e,'latest_version') or 'ukendt' }}
+                        {% endfor -%}
+
+      # ----- CLEARED: (valgfri log/persistent note) -----
+      - conditions: "{{ trigger.id == 'cleared' }}"
+        sequence:
+          - variables:
+              diag_message: "[cleared] {{ trigger.entity_id }}"
+          - sequence: *DIAG_HELPER
+          - if: "{{ _send_to_ha }}"
+            then:
+              - service: persistent_notification.create
+                data:
+                  notification_id: "{{ trigger.entity_id | replace('update.','') }}"
+                  title: "{{ state_attr(trigger.entity_id, 'friendly_name') }}"
+                  message: >-
+                    Nyeste: {{ state_attr(trigger.entity_id, 'latest_version') }}
+                    \nInstalleret: {{ state_attr(trigger.entity_id, 'installed_version') }}
